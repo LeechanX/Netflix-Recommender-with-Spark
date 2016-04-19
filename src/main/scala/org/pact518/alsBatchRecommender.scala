@@ -31,6 +31,13 @@ object alsBatchRecommender {
     productsSimilarity.saveAsObjectFile(dataDir + "similarity_obj")
   }
 
+  def writeRecommendingResults(model: MatrixFactorizationModel, K: Int, dataDir: String): Unit = {
+    model.recommendProductsForUsers(K)
+    .map{ case (userId, ratingsSeq) =>
+      (userId, ratingsSeq.map{oneRating => (oneRating.product, oneRating.rating)})
+    }.saveAsObjectFile(dataDir + "recommendingResults")
+  }
+
   def main(args: Array[String]) {
     val conf = new SparkConf().setAppName("alsBatchRecommender").set("spark.executor.memory", "1536m")
     val sc = new SparkContext(conf)
@@ -56,6 +63,10 @@ object alsBatchRecommender {
 
     val (rank, lambda) = (10, 0.01)
     val model = ALS.train(trainData, rank, iterations, lambda)
+
+    calculateAllCosineSimilarity(model, dataDir)
+    writeRecommendingResults(model, 10, dataDir)
+
     val rmse = computeRmse(model, realRatings)
     println("the Rmse = " + rmse)
 
