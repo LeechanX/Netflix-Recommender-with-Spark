@@ -22,20 +22,28 @@ object alsBatchRecommender {
       val factorVector = new DoubleMatrix(factor)
       (movieId, factorVector)
     }
+    
     val productsSimilarity = productsVectorRdd.cartesian(productsVectorRdd)
       .filter{ case ((movieId1, vector1), (movieId2, vector2)) => movieId1 != movieId2 }
       .map{case ((movieId1, vector1), (movieId2, vector2)) =>
         val sim = cosineSimilarity(vector1, vector2)
         (movieId1, movieId2, sim)
       }.filter(_._3 >= minSimilarity)
-    productsSimilarity.saveAsObjectFile(dataDir + "similarity_obj")
+    
+    productsSimilarity.map{ case (movieId1, movieId2, sim) => 
+      movieId1.toString + "," + movieId2.toString + "," + sim.toString
+    }.saveAsTextFile(dataDir + "similarity_obj")
+
+    productsVectorRdd.unpersist()
+    productsSimilarity.unpersist()
   }
 
   def writeRecommendingResults(model: MatrixFactorizationModel, K: Int, dataDir: String): Unit = {
     model.recommendProductsForUsers(K)
     .map{ case (userId, ratingsSeq) =>
-      (userId, ratingsSeq.map{oneRating => (oneRating.product, oneRating.rating)})
-    }.saveAsObjectFile(dataDir + "recommendingResults")
+      val ratingsStrArr = ratingsSeq.map{oneRating => oneRating.product.toString + "+" + oneRating.rating.toString}
+      userId.toString + ":" + ratingsStrArr.mkString(",")
+    }.saveAsTextFile(dataDir + "recommendingResults")
   }
 
   def main(args: Array[String]) {
@@ -46,17 +54,7 @@ object alsBatchRecommender {
 
     val dataDir = "hdfs://master:9000/leechanx/netflix/"
 
-    val movieId2Title = sc.textFile(dataDir + "movie_titles.txt").map { line =>
-      val lineAttrs = line.trim.split(",")
-      (lineAttrs(0).toInt, lineAttrs(2))
-    }.collectAsMap()
-
     val trainData = sc.textFile(dataDir + "trainingData.txt").map{ line =>
-      val lineAttrs = line.trim.split(",")
-      Rating(lineAttrs(1).toInt, lineAttrs(0).toInt, lineAttrs(2).toDouble)
-    }
-
-    val realRatings = sc.textFile(dataDir + "realRatings.txt").map{ line =>
       val lineAttrs = line.trim.split(",")
       Rating(lineAttrs(1).toInt, lineAttrs(0).toInt, lineAttrs(2).toDouble)
     }
@@ -64,8 +62,15 @@ object alsBatchRecommender {
     val (rank, lambda) = (10, 0.01)
     val model = ALS.train(trainData, rank, iterations, lambda)
 
+    trainData.unpersist()
+
     calculateAllCosineSimilarity(model, dataDir)
     writeRecommendingResults(model, 10, dataDir)
+
+    val realRatings = sc.textFile(dataDir + "realRatings.txt").map{ line =>
+      val lineAttrs = line.trim.split(",")
+      Rating(lineAttrs(1).toInt, lineAttrs(0).toInt, lineAttrs(2).toDouble)
+    }
 
     val rmse = computeRmse(model, realRatings)
     println("the Rmse = " + rmse)

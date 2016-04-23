@@ -1,4 +1,4 @@
-name := "StreamingWithKafka"
+name := "NetflixRecommender"
  
 version := "1.0"
   
