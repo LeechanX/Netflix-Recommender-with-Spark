@@ -38,34 +38,26 @@ object alsBatchRecommender {
     productsSimilarity.unpersist()
   }
 
-  def writeRecommendingResults(model: MatrixFactorizationModel, K: Int, dataDir: String): Unit = {
-    model.recommendProductsForUsers(K)
-    .map{ case (userId, ratingsSeq) =>
-      val ratingsStrArr = ratingsSeq.map{oneRating => oneRating.product.toString + "+" + oneRating.rating.toString}
-      userId.toString + ":" + ratingsStrArr.mkString(",")
-    }.saveAsTextFile(dataDir + "recommendingResults")
-  }
-
   def main(args: Array[String]) {
-    val conf = new SparkConf().setAppName("alsBatchRecommender").set("spark.executor.memory", "1536m")
+    val conf = new SparkConf().setAppName("alsBatchRecommender").set("spark.executor.memory", "2g")
     val sc = new SparkContext(conf)
 
     val iterations = if (args.length > 0) args(0).toInt else 5
 
-    val dataDir = "hdfs://master:9000/leechanx/netflix/"
+    val dataDir = "hdfs://master:9001/leechanx/netflix/"
 
     val trainData = sc.textFile(dataDir + "trainingData.txt").map{ line =>
       val lineAttrs = line.trim.split(",")
       Rating(lineAttrs(1).toInt, lineAttrs(0).toInt, lineAttrs(2).toDouble)
-    }
+    }.cache()
 
     val (rank, lambda) = (10, 0.01)
     val model = ALS.train(trainData, rank, iterations, lambda)
 
     trainData.unpersist()
 
-    calculateAllCosineSimilarity(model, dataDir)
-    writeRecommendingResults(model, 10, dataDir)
+    calculateAllCosineSimilarity(model, dataDir) //save cos sim.
+    model.save(sc, dataDir + "ALSmodel") //save model.
 
     val realRatings = sc.textFile(dataDir + "realRatings.txt").map{ line =>
       val lineAttrs = line.trim.split(",")

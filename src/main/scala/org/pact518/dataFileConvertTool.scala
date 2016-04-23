@@ -41,7 +41,7 @@ object dataFileConvertTool {
     val sparkConf = new SparkConf().setAppName("dataFileConvertTool")
     val sc = new SparkContext(sparkConf)
     val sqlctx = new SQLContext(sc)
-    convertRatingFile2ParquetFile(sc, sqlctx, "hdfs://master:9000/leechanx/netflix/trainingData.txt")
+    convertRatingFile2ParquetFile(sc, sqlctx, "hdfs://master:9001/leechanx/netflix/trainingData.txt")
     writeSimilarityFile2Redis(sc, "")
     sc.stop()
   }
