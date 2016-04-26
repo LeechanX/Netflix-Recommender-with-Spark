@@ -2,12 +2,10 @@ package org.pact518
 
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.SQLContext
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.kafka._
 import com.redislabs.provider.redis._
-
-import redis.clients.jedis.Jedis
+import com.mongodb.casbah.Imports._
 
 /**
   * Created by LeechanXhit on 2016/4/18.
@@ -16,60 +14,44 @@ import redis.clients.jedis.Jedis
 object similarityStreamingRecommender {
   private val checkpointDir = "popularity-data-checkpoint"
   private val msgConsumerGroup = "user-behavior-topic-message-consumer-group"
-  private val minSimilarity = 0.5
+  private val minSimilarity = 0.6
 
-  def getUserRecentRatings(sc: SparkContext, sqlctx: SQLContext, K: Int, userId: Int): RDD[(Int, Double)] = {
-    //firstly, read recent rating data from redis, if count > K, return it;
-    //else, continue to read rating from HDFS Parquet file.
-    val todayRatingsRdd = sc.fromRedisHash(userId + "today_ratings")
-      .map{ case (movieIdStr, rateAndTimestampStr) =>
-        val dataArr: Array[String] = rateAndTimestampStr.trim.split("\\|")
-        val rate = dataArr(0).toDouble
-        val timestamp = dataArr(1).toLong
-        (movieIdStr.toInt, rate, timestamp)
-      }
-    val count = todayRatingsRdd.count()
-    if (count >= K) {
-      sc.parallelize(todayRatingsRdd.top(K)(Ordering.by[(Int, Double, Long), Long](_._3)))
-        .map{case (movieId, rate, timestamp) => (movieId, rate)}
-    } else {
-      val stillNeed = K - count
-      val rate4user1 = sqlctx.sql("select movieId,rate from ratings where userId = '"
-        + userId + "' ORDER BY Timestamp DESC LIMIT " + stillNeed)
-      val beforeRatingsRdd = rate4user1.map(eachRow => eachRow.toSeq.map(_.toString)).map{ab => (ab.head.toInt, ab(1).toDouble)}
-      todayRatingsRdd.map{ case (movieId, rate, timestamp) => (movieId, rate)}.union(beforeRatingsRdd)
+  def getUserRecentRatings(mongoClient: MongoClient, sc: SparkContext, mongoMaster: String, K: Int, userId: Int): RDD[(Int, Double)] = {
+    //read recent rating data from MongoDB, return it;
+    val collection = mongoClient("RecommendingSystem")("ratingRecords")
+    val query = MongoDBObject("userId" -> userId)
+    val orderBy = MongoDBObject("timestamp" -> -1)
+    val recentKRatings = collection.find(query).sort(orderBy).limit(K).toArray.map{ item =>
+      (item.get("movieId").toString.toInt, item.get("rate").toString.toDouble)
+    }
+    sc.parallelize(recentKRatings)
+  }
+
+  def getSimilarMovies(mongoClient: MongoClient, sc: SparkContext, movieId: Int): RDD[Int] = {
+    //sc.fromRedisHash(movieId.toString).map{case (simMovieId, sim) => simMovieId.toInt}
+    val collection = mongoClient("RecommendingSystem")("productSimilarity")
+    val query = MongoDBObject("Id1" -> 3) ++ ("sim" $gt  0.6)
+    val similarMovies = collection.find(query).toArray.map(_.get("Id2").toString.toInt)
+    sc.parallelize(similarMovies)
+  }
+
+  def getSimilarityBetween2Movies(collection: MongoCollection, movieId1: Int, movieId2: Int): Double = {
+    val queryResult = collection.findOne(MongoDBObject("Id1" -> movieId1, "Id2" -> movieId2))
+    queryResult match {
+      case Some(item) => item.get("sim").toString.toDouble
+      case None => 0.0
     }
   }
 
-  def getSimilarMovies(sc: SparkContext, movieId: Int): RDD[Int] = {
-    sc.fromRedisHash(movieId.toString).map{case (simMovieId, sim) => simMovieId.toInt}
-  }
-
-  def getSimilarityBetween2Movies(jedis: Jedis, movieId1: Int, movieId2: Int): Double = {
-    jedis.hget(movieId1.toString, movieId2.toString).toDouble
-  }
-
-  def createUpdatedRatings_OLD(recentRatings: RDD[(Int, Double)], candidateMovies: RDD[Int]): RDD[(Int, Double)] = {
-      val allSimilarityRdd = candidateMovies
-        .cartesian(recentRatings)
-        .filter{ case(cmovieId, (rmovieId, rate)) => cmovieId != rmovieId}
-        .map{ case(cmovieId, (rmovieId, rate)) => (cmovieId, /*getSimilarityBetween2Movies(cmovieId, rmovieId)*/0, rate)}
-        .filter(_._2 > minSimilarity) //allSimilarityRdd = [(cmovieId, sim, rate)]
-      val numeratorRdd = allSimilarityRdd
-          .map{case (cmovieId, sim, rate) => (cmovieId, sim * rate)}.reduceByKey(_ + _) //numeratorRdd = [(cmovieId, sum of sim * rate)]
-      val denominatorRdd = allSimilarityRdd
-          .map{case (cmovieId, sim, rate) => (cmovieId, sim)}.reduceByKey(_ + _) //denominatorRdd = [(cmovieId, sum of sim)]
-      numeratorRdd.join(denominatorRdd).map{ case (cmovieId, (numerator, denominator)) => (cmovieId, numerator / denominator)} //numeratorRdd = [(cmovieId, inferRate)]
-    }
-
-  def createUpdatedRatings(recentRatings: RDD[(Int, Double)], candidateMovies: RDD[Int]): RDD[(Int, Double)] = {
+  def createUpdatedRatings(mongoMaster: String, recentRatings: RDD[(Int, Double)], candidateMovies: RDD[Int]): RDD[(Int, Double)] = {
     val allSimilarityRdd = candidateMovies
       .cartesian(recentRatings)
       .filter{ case(cmovieId, (rmovieId, rate)) => cmovieId != rmovieId}
       .mapPartitions{ partition =>
-        val jedis = new Jedis("192.168.48.166")
+        val mongoClient = MongoClient(mongoMaster, 27017)
+        val collection = mongoClient("RecommendingSystem")("productSimilarity")
         partition.map{ case(cmovieId, (rmovieId, rate)) =>
-          (cmovieId, getSimilarityBetween2Movies(jedis, cmovieId, rmovieId), rate)
+          (cmovieId, getSimilarityBetween2Movies(collection, cmovieId, rmovieId), rate)
         }
       }.filter(_._2 > minSimilarity) //allSimilarityRdd = [(cmovieId, sim, rate)]
 
@@ -107,16 +89,13 @@ object similarityStreamingRecommender {
       .set("redis.host", "localhost").set("redis.port", "6379").set("redis.auth", "")
     val sc = new SparkContext(sparkConf)
     val ssc = new StreamingContext(sc, Seconds(3)) //for spark streaming
-    val sqlctx = new SQLContext(sc) //for spark SQL
 
     //set for spark streaming
     ssc.checkpoint(checkpointDir)
     val zkServers = "192.168.48.162:2181"
     val kafkaStream = KafkaUtils.createStream(ssc, zkServers, msgConsumerGroup, Map("user-behavior-topic" -> 3))
 
-    //application for spark sql
-    val ratingsDF = sqlctx.read.parquet("") //读取parquetFile of ratings
-    ratingsDF.registerTempTable("ratings_table")   //将这个DataFrame注册为一个临时的数据库表，表名为ratings_table
+    val mongoMaster = args(0)
 
     kafkaStream.foreachRDD(rdd => {
       val newRatesRdd = rdd.map{case (key, msgLine) =>
@@ -127,11 +106,13 @@ object similarityStreamingRecommender {
         (userID.toInt, productId.toInt, rate.toDouble)
       }
       val allRates = newRatesRdd.collect()
+
+      val mongoClient = MongoClient(mongoMaster, 27017)
       for ((userId, movieId, rate) <- allRates) {
-        val recentRatings = getUserRecentRatings(sc, sqlctx, 10, userId)
-        val candidateMovies = getSimilarMovies(sc, movieId)
+        val recentRatings = getUserRecentRatings(mongoClient, sc, mongoMaster, 10, userId)
+        val candidateMovies = getSimilarMovies(mongoClient, sc, movieId)
         val recentRecommends = getRecentRecommends(sc, userId)
-        val updatedRecommends = createUpdatedRatings(recentRatings, candidateMovies)
+        val updatedRecommends = createUpdatedRatings(mongoMaster, recentRatings, candidateMovies)
         //updatedRecommends and recentRecommends merge to K recommends.
         val newRecommends = mergeToNewRecommends(recentRecommends, updatedRecommends, 100)
         //and print it.

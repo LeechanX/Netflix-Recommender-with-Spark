@@ -11,11 +11,11 @@ import org.jblas.DoubleMatrix
   */
 
 object alsBatchRecommender {
-  private val minSimilarity = 0.5
+  private val minSimilarity = 0.6
 
   def cosineSimilarity(vector1: DoubleMatrix, vector2: DoubleMatrix): Double = vector1.dot(vector2) / (vector1.norm2() * vector2.norm2())
 
-  def calculateAllCosineSimilarity(model: MatrixFactorizationModel, dataDir: String): Unit = {
+  def calculateAllCosineSimilarity(model: MatrixFactorizationModel, dataDir: String, dateStr: String): Unit = {
     //calculate all the similarity and store the stuff whose sim > 0.5 to Redis.
     val productsVectorRdd = model.productFeatures
       .map{case (movieId, factor) =>
@@ -32,7 +32,7 @@ object alsBatchRecommender {
     
     productsSimilarity.map{ case (movieId1, movieId2, sim) => 
       movieId1.toString + "," + movieId2.toString + "," + sim.toString
-    }.saveAsTextFile(dataDir + "similarity_obj")
+    }.saveAsTextFile(dataDir + "allSimilarity_" + dateStr)
 
     productsVectorRdd.unpersist()
     productsSimilarity.unpersist()
@@ -41,8 +41,15 @@ object alsBatchRecommender {
   def main(args: Array[String]) {
     val conf = new SparkConf().setAppName("alsBatchRecommender").set("spark.executor.memory", "2g")
     val sc = new SparkContext(conf)
+    if (args.length < 1) {
+        println("USAGE:")
+        println("spark-submit ... xxx.jar Date_String [Iteration]")
+        println("spark-submit ... xxx.jar 20160424 10")
+        sys.exit()
+    }
+    val dateStr = args(0)
 
-    val iterations = if (args.length > 0) args(0).toInt else 5
+    val iterations = if (args.length > 1) args(1).toInt else 5
 
     val dataDir = "hdfs://master:9001/leechanx/netflix/"
 
@@ -56,8 +63,8 @@ object alsBatchRecommender {
 
     trainData.unpersist()
 
-    calculateAllCosineSimilarity(model, dataDir) //save cos sim.
-    model.save(sc, dataDir + "ALSmodel") //save model.
+    calculateAllCosineSimilarity(model, dataDir, dateStr) //save cos sim.
+    model.save(sc, dataDir + "ALSmodel_" + dateStr) //save model.
 
     val realRatings = sc.textFile(dataDir + "realRatings.txt").map{ line =>
       val lineAttrs = line.trim.split(",")
