@@ -11,7 +11,7 @@ import com.mongodb.casbah.Imports.{MongoClient, MongoCollection, MongoDBObject, 
   */
 
 object streamingRecommender {
-  private val msgConsumerGroup = "spark-streaming-topic-message-consumer-group"
+  private val msgConsumerGroup = "netflix-recommending-system-topic-message-consumer-group"
   private val minSimilarity = 0.7
 
   def getUserRecentRatings(collection: MongoCollection, K: Int, userId: Int, movieId: Int, rate: Double, timestamp: Long): Array[(Int, Double)] = {
@@ -82,14 +82,7 @@ object streamingRecommender {
   }
 
   def main(args: Array[String]) {
-    if (args.length != 2) {
-      println("Usage:")
-      println("xxxx.jar MasterHost Topic-Name")
-      System.exit(1)
-    }
-    val masterHost = args(0)
-    val topicName = args(1)
-
+    val hdfsDir = "hdfs://master:9001/leechanx/netflix/"
     val sparkConf = new SparkConf().setAppName("streamingRecommendingSystem")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
       .set("spark.streaming.concurrentJobs", "5")
@@ -99,7 +92,7 @@ object streamingRecommender {
     val sc = new SparkContext(sparkConf)
 
     //每个电影的最相似的K个电影，HASH[电影Id, 相似的K个电影Ids]
-    val topKMostSimilarMovies = sc.textFile("hdfs://master:9001/leechanx/netflix/simTopK.txt")
+    val topKMostSimilarMovies = sc.textFile(hdfsDir + "simTopK.txt")
       .map{line =>
         val dataArr = line.trim.split(":")
         val movieId = dataArr(0).toInt
@@ -108,7 +101,7 @@ object streamingRecommender {
       }.collectAsMap
 
     //每个电影与其他电影的相似度，HASH[电影Id, HASH[电影Id2, Id1与Id2相似度]]
-    val movie2movieSimilarity = sc.textFile("hdfs://master:9001/leechanx/netflix/simSimi.txt")
+    val movie2movieSimilarity = sc.textFile(hdfsDir + "simSimi.txt")
       .map{line =>
         val dataArr = line.trim.split(":")
         val movieId1 = dataArr(0).toInt
@@ -136,18 +129,19 @@ object streamingRecommender {
     }.count()
     println(useless)
 
-    val zkServers = masterHost + ":2181"
+    val zkServers = "192.168.110.62:2181,192.168.110.60:2181,192.168.110.70:2181,192.168.110.61:2181,192.168.110.65:2181"
     val K: Int = 20
 
     //MONGODB连接者，逃避序列化问题，且一个JVM只有一个连接者，提高性能
     object SingleMongoDB extends Serializable {
-      lazy val mongoClient = MongoClient(masterHost, 27017)
+      lazy val mongoClient = MongoClient("192.168.110.62", 27017)
       def getCollection(collectionName: String): MongoCollection = {
         mongoClient("RecommendingSystem")(collectionName)
       }
     }
 
-    val dataDStreams = (1 to 5).map{i => KafkaUtils.createStream(ssc, zkServers, msgConsumerGroup, Map(topicName -> 3))}
+    val dataDStreams = (1 to 5).map{i =>
+      KafkaUtils.createStream(ssc, zkServers, msgConsumerGroup, Map("netflix-recommending-system-topic" -> 3))}
     var unifiedStream = ssc.union(dataDStreams).map(_._2)
     unifiedStream = unifiedStream.repartition(50)
 
@@ -192,7 +186,7 @@ object streamingRecommender {
       }
     }
 
-    ssc.checkpoint("hdfs://master:9001/leechanx/netflix/checkpoint_dir")
+    ssc.checkpoint(hdfsDir + "checkpoint_dir")
     ssc.start()
     ssc.awaitTermination()
   }
