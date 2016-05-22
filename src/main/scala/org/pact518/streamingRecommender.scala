@@ -1,6 +1,7 @@
 package org.pact518
 
 import scala.collection.mutable
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.kafka._
@@ -56,38 +57,56 @@ object streamingRecommender {
     }
   }
 
+  def log(m: Double): Double = math.log(m) / math.log(2)
+
   def createUpdatedRatings(simiHash: collection.Map[Int, collection.Map[Int, Double]], recentRatings: Array[(Int, Double)], candidateMovies: Array[Int]): Array[(Int, Double)] = {
     //function feature: 核心算法，计算每个备选电影的预期评分
     //return type：备选电影预计评分的数组，每一项是<movieId, maybe_rate>
     val allSimilars = mutable.ArrayBuffer[(Int, Double)]()
+    val counter = mutable.Map[Int, Int]()
     for (cmovieId <- candidateMovies; (rmovieId, rate) <- recentRatings) {
       val sim = getSimilarityBetween2Movies(simiHash, rmovieId, cmovieId)
       if (sim > minSimilarity) {
         allSimilars += ((cmovieId, sim * rate))
+        if (rate >= 3.5) {
+          counter(cmovieId) = counter.getOrElse[Int](cmovieId, 0) + 1
+        }
       }
     }
     allSimilars.toArray.groupBy{case (movieId, value) => movieId}
       .map{ case (movieId, simArray) =>
-        (movieId, simArray.map(_._2).sum / simArray.length)
+        (movieId, simArray.map(_._2).sum / simArray.length + log(counter.getOrElse[Int](movieId, 1)))
       }.toArray
   }
 
   def updateRecommends2MongoDB(collection: MongoCollection, newRecommends: Array[(Int, Double)], userId: Int, startTimeMillis: Long): Boolean = {
     //function feature: 将备选电影的预期评分回写到MONGODB中
+    val endTimeMillis = System.currentTimeMillis()
+    /*
     val query = MongoDBObject("userId" -> userId)
     val setter = $set("recommending" -> newRecommends.map(item => item._1.toString + "," + item._2.toString).mkString("|"),
-      "timedelay" -> (System.currentTimeMillis() - startTimeMillis).toDouble / 1000)
+    "timedelay" -> (System.currentTimeMillis() - startTimeMillis).toDouble / 1000)
     collection.update(query, setter, upsert = true, multi = false)
+    */
+    val toInsert = MongoDBObject("userId" -> userId,
+      "recommending" -> newRecommends.map(item => item._1.toString + "," + item._2.toString).mkString("|"),
+      "timedelay" -> (endTimeMillis - startTimeMillis).toDouble / 1000)
+    collection.insert(toInsert)
     true
   }
-
+  
   def main(args: Array[String]) {
+    if (args.length != 1) {
+      println("USAGE: netflix-recommending-system.jar BatchDuration")
+      System.exit(1)
+    }
     val hdfsDir = "hdfs://master:9001/leechanx/netflix/"
     val sparkConf = new SparkConf().setAppName("streamingRecommendingSystem")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-      .set("spark.streaming.concurrentJobs", "5")
+      .set("spark.streaming.concurrentJobs", "9")
       .set("spark.driver.memory", "4g")
       .set("spark.executor.memory", "3g")
+      .set("spark.driver.cores", "10")
 
     val sc = new SparkContext(sparkConf)
 
@@ -114,7 +133,7 @@ object streamingRecommender {
         (movieId1, similarities.toMap)
       }.collectAsMap
 
-    val ssc = new StreamingContext(sc, Seconds(3)) //for spark streaming
+    val ssc = new StreamingContext(sc, Seconds(args(0).toInt)) //for spark streaming
     //最相似电影HASH的广播
     val bTopKMostSimilarMovies = ssc.sparkContext.broadcast(topKMostSimilarMovies)
     //电影间相似度HASH的广播
@@ -141,9 +160,9 @@ object streamingRecommender {
     }
 
     val dataDStreams = (1 to 5).map{i =>
-      KafkaUtils.createStream(ssc, zkServers, msgConsumerGroup, Map("netflix-recommending-system-topic" -> 3))}
+      KafkaUtils.createStream(ssc, zkServers, msgConsumerGroup, Map("netflix-recommending-system-topic" -> 3), StorageLevel.MEMORY_ONLY)}
     var unifiedStream = ssc.union(dataDStreams).map(_._2)
-    unifiedStream = unifiedStream.repartition(50)
+    unifiedStream = unifiedStream.repartition(80)
 
     val dataDStream = unifiedStream.map{ case msgLine =>
       val dataArr: Array[String] = msgLine.split("\\|")
@@ -176,7 +195,7 @@ object streamingRecommender {
     }
 
     val movieIdCount = dataDStream.map{case (userId, movieId, rate, startTimeMillis) => (movieId, 1)}
-    val stateDStream = movieIdCount.updateStateByKey[Int](updateFunc).cache()
+    val stateDStream = movieIdCount.updateStateByKey[Int](updateFunc)
 
     //选出TOP5的电影
     stateDStream.foreachRDD{rdd =>
