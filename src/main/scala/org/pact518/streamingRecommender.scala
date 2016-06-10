@@ -63,19 +63,24 @@ object streamingRecommender {
     //function feature: 核心算法，计算每个备选电影的预期评分
     //return type：备选电影预计评分的数组，每一项是<movieId, maybe_rate>
     val allSimilars = mutable.ArrayBuffer[(Int, Double)]()
-    val counter = mutable.Map[Int, Int]()
+
+    val increaseCounter = mutable.Map[Int, Int]()
+    val reduceCounter = mutable.Map[Int, Int]()
+
     for (cmovieId <- candidateMovies; (rmovieId, rate) <- recentRatings) {
       val sim = getSimilarityBetween2Movies(simiHash, rmovieId, cmovieId)
       if (sim > minSimilarity) {
         allSimilars += ((cmovieId, sim * rate))
-        if (rate >= 3.5) {
-          counter(cmovieId) = counter.getOrElse[Int](cmovieId, 0) + 1
+        if (rate >= 3.0) {
+          increaseCounter(cmovieId) = increaseCounter.getOrElse(cmovieId, 0) + 1
+        } else {
+          reduceCounter(cmovieId) = reduceCounter.getOrElse(cmovieId, 0) + 1
         }
       }
     }
     allSimilars.toArray.groupBy{case (movieId, value) => movieId}
       .map{ case (movieId, simArray) =>
-        (movieId, simArray.map(_._2).sum / simArray.length + log(counter.getOrElse[Int](movieId, 1)))
+        (movieId, simArray.map(_._2).sum / simArray.length + log(increaseCounter.getOrElse[Int](movieId, 1)) - log(reduceCounter.getOrElse[Int](movieId, 1)))
       }.toArray
   }
 
@@ -162,7 +167,7 @@ object streamingRecommender {
     val dataDStreams = (1 to 5).map{i =>
       KafkaUtils.createStream(ssc, zkServers, msgConsumerGroup, Map("netflix-recommending-system-topic" -> 3), StorageLevel.MEMORY_ONLY)}
     var unifiedStream = ssc.union(dataDStreams).map(_._2)
-    unifiedStream = unifiedStream.repartition(80)
+    unifiedStream = unifiedStream.repartition(160)
 
     val dataDStream = unifiedStream.map{ case msgLine =>
       val dataArr: Array[String] = msgLine.split("\\|")

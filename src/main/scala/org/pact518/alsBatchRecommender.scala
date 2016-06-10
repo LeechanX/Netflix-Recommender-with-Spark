@@ -58,7 +58,7 @@ object alsBatchRecommender {
       Rating(lineAttrs(1).toInt, lineAttrs(0).toInt, lineAttrs(2).toDouble)
     }.cache()
 
-    val (rank, lambda) = (10, 0.01)
+    val (rank, lambda) = (50, 0.01)
     val model = ALS.train(trainData, rank, iterations, lambda)
 
     trainData.unpersist()
